@@ -7,7 +7,7 @@
 <p align="center">
   <b>One click to go dark. Your Mac keeps working.</b><br>
   A tiny menu bar app that turns off your MacBook's screen and keyboard light and locks it,<br>
-  while Claude Code, builds, downloads and training runs keep going.
+  while Claude Code, builds, downloads and training runs keep going. Lid open or closed.
 </p>
 
 <p align="center">
@@ -29,20 +29,21 @@ AI coding agents like Claude Code can run for minutes or hours. When you step aw
 
 So people tilt the lid *almost* shut and hope the screen turns off without the Mac going to sleep.
 
-**LightsOut is the third option.** Click the moon in your menu bar and every light on the laptop goes off,
-the Mac locks, and your work keeps running until you come back.
+**LightsOut is the third option.** Click the moon in your menu bar (or press your shortcut), and every light on the laptop goes off
+and the Mac locks. Your work keeps running until you come back. If you turn on lid-closed mode, you can also close the lid.
 
-## What one click does
+## Features
 
-| Step | What happens |
+| | |
 | --- | --- |
-| 1 | **Keyboard backlight → 0** |
-| 2 | **Screen locks**, exactly like <kbd>⌃</kbd> <kbd>⌘</kbd> <kbd>Q</kbd> |
-| 3 | **Display turns off** as soon as your hands leave the trackpad. If a stray touch wakes it in the next 10 s, it goes dark again. |
-| 4 | **The Mac stays awake** so running jobs aren't paused |
-| ↩ | **When you unlock**, the keyboard light comes back and your normal sleep settings apply again |
-
-Right-click the moon for **Start at Login** and **Quit**.
+| 🌙 **One click or one shortcut** | Click the menu bar moon or press a keyboard shortcut you choose. |
+| ⌨️ **Keyboard light off** | Backlight goes to 0, and comes back to your level when you unlock. |
+| 🔒 **Locks instantly** | The same lock as <kbd>⌃</kbd> <kbd>⌘</kbd> <kbd>Q</kbd>. |
+| 🖥️ **Screen off, and it stays off** | Waits until your hands leave the trackpad. If a stray touch wakes the display in the next 10 s, it goes dark again. |
+| ⚡ **Keeps working** | Holds the Mac awake while locked, so jobs aren't paused. |
+| 💻 **Lid-closed mode** *(optional)* | Close the lid and the Mac keeps running. Asks for your admin password once. |
+| 🔋 **Battery safety net** | On battery, normal sleep returns below a charge level you pick (default 20%). |
+| ↩️ **Back to normal on unlock** | Your usual sleep settings return the moment you unlock, after a quit, and after a crash or restart. |
 
 ## Install
 
@@ -66,9 +67,56 @@ cd lightsout
 This needs only Apple's free Command Line Tools (`xcode-select --install`). If `git` works, you already have them.
 Apps you compile yourself are not quarantined, so macOS doesn't ask for approval.
 
-### Uninstall
+## Use it
 
-Quit LightsOut from its menu and delete it from Applications, or run `./uninstall.sh`. The script also removes the login entry and settings.
+- **Click the moon** to turn everything off. **Unlock** as usual to come back.
+- **Right-click the moon** for *Lights Out Now*, *Settings…* and *Quit*.
+
+### Settings
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/settings-dark.png">
+    <img src="assets/settings-light.png" width="488" alt="LightsOut Settings window: shortcut recorder, lid-closed mode checkbox, battery cutoff menu, start at login">
+  </picture>
+</p>
+
+- **Lights-out shortcut:** click the button and press a combination that includes <kbd>⌘</kbd> or <kbd>⌃</kbd>, for example
+  <kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>L</kbd>. F-keys work on their own. <kbd>Delete</kbd> clears it, <kbd>Esc</kbd> cancels.
+  No shortcut is set by default.
+- **Keep running with the lid closed:** see [Lid-closed mode](#lid-closed-mode).
+- **On battery, let the Mac sleep at:** Never, 10%, 20% (default), 30% or 50%.
+- **Start LightsOut at login:** on by default.
+
+## Lid-closed mode
+
+macOS always sleeps when you close the lid. The only switch that overrides this, `pmset -a disablesleep 1`, needs root.
+LightsOut asks for your password **once**, when you tick the box, and installs this sudo rule:
+
+```
+# /etc/sudoers.d/lightsout
+<you> ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0
+```
+
+The rule lets LightsOut run exactly those two commands and nothing else. It is checked with `visudo` before it is installed.
+From then on:
+
+- **Lights out:** sleep is disabled, so you can close the lid.
+- **Unlock:** sleep is enabled again, silently and immediately.
+
+Unticking the box (or running `./uninstall.sh`) asks for your password again and removes the rule.
+
+### Your Mac is never left stuck awake
+
+| When | What LightsOut does |
+| --- | --- |
+| You unlock | Releases the stay-awake hold, turns sleep back on, restores the keyboard light |
+| Battery falls to your cutoff | Releases the hold and turns sleep back on, even while locked |
+| You quit LightsOut, log out or shut down | Same clean-up before exiting (it also handles `SIGTERM` from `launchd`) |
+| Crash, force quit or power loss | A "sleep is disabled" flag is saved to disk first, and the next launch turns sleep back on |
+| You had disabled sleep yourself | LightsOut leaves it alone and never turns it back on for you |
+
+This holds in both modes. Without lid-closed mode, LightsOut only holds an ordinary power assertion (no root involved).
 
 ## How it works
 
@@ -77,9 +125,12 @@ sequenceDiagram
     actor You
     participant L as LightsOut
     participant M as macOS
-    You->>L: click the moon
+    You->>L: click the moon / press shortcut
     L->>M: keyboard backlight = 0
     L->>M: power assertion "PreventUserIdleSystemSleep"
+    opt lid-closed mode on
+        L->>M: sudo -n pmset -a disablesleep 1
+    end
     L->>M: lock screen
     loop every 0.25 s, up to 10 s after the last dark
         L->>M: display on and no input for 1 s → display off
@@ -87,16 +138,19 @@ sequenceDiagram
     Note over M: screen and keyboard dark,<br/>jobs still running
     You->>M: unlock
     M-->>L: com.apple.screenIsUnlocked
-    L->>M: release power assertion, restore keyboard light
+    L->>M: release assertion, disablesleep 0, restore keyboard light
 ```
 
 | Job | How | Notes |
 | --- | --- | --- |
-| Stay awake | IOKit power assertion `PreventUserIdleSystemSleep` | Same as `caffeinate -i`: the display may sleep, the system may not. Visible in `pmset -g assertions`. |
+| Stay awake (lid open) | IOKit power assertion `PreventUserIdleSystemSleep` | Same as `caffeinate -i`: the display may sleep, the system may not. Visible in `pmset -g assertions`. |
+| Stay awake (lid closed) | `pmset -a disablesleep 1` through a one-command sudo rule | Opt-in. A flag saved to disk makes sure it is always undone. |
 | Lock | `SACLockScreenImmediate()` from `login.framework` | The function behind <kbd>⌃⌘Q</kbd>. Falls back to `CGSession -suspend` on older macOS. |
 | Display off | `pmset displaysleepnow` | Waits until `HIDIdleTime` (seconds since last keyboard/trackpad input) ≥ 1 s. |
-| Keyboard light | `KeyboardBrightnessClient` from `CoreBrightness.framework` | The same interface Control Center uses. Previous level is saved and restored on unlock. |
-| Start at login | A LaunchAgent in `~/Library/LaunchAgents` | Behaves the same on every macOS version. `KeepAlive` restarts it after a crash, not after Quit. |
+| Keyboard light | `KeyboardBrightnessClient` from `CoreBrightness.framework` | The same interface Control Center uses. |
+| Shortcut | Carbon `RegisterEventHotKey` | System-wide, and needs **no Accessibility permission**. |
+| Battery cutoff | IOKit power-source notifications | Re-checked on every plug/unplug and charge change. |
+| Start at login | A LaunchAgent in `~/Library/LaunchAgents` | Behaves the same on every macOS version. Restarts after a crash, not after Quit. |
 
 **Why the hands-off wait?** The first version turned the display off after a fixed 1 s delay, and the lock screen kept coming back.
 `pmset -g log` showed why: the finger still resting on the trackpad sent a touch event that woke the display in the same second.
@@ -104,9 +158,10 @@ Now LightsOut waits for 1 s of no input, then guards for 10 s and turns the disp
 
 ## Privacy and permissions
 
-- **No permissions:** no Accessibility, Screen Recording or Full Disk Access prompts.
+- **No Accessibility, Screen Recording or Full Disk Access prompts.** The keyboard shortcut works without them.
+- **Admin password only if you turn on lid-closed mode.** It is used once, for the single rule shown above.
 - **No network access, no analytics, no data collected.**
-- **Small enough to read:** the whole app is one ~270-line Objective-C file, [`LightsOut.m`](LightsOut.m).
+- **Small enough to read:** about 1,100 lines of Objective-C in [`src/`](src).
 
 ## Compatibility
 
@@ -119,32 +174,45 @@ Now LightsOut waits for 1 s of no input, then guards for 10 s and turns the disp
 ## FAQ
 
 **Can I close the lid?**
-No. macOS always sleeps on lid close unless an external display is attached. Overriding that needs `sudo`. LightsOut is built so the lid can stay open while the screen is dark.
+Yes, with lid-closed mode turned on in Settings. Without it, keep the lid open; the screen and keyboard are dark anyway.
+
+**Is it safe to close the lid and put the Mac in a bag?**
+A closed Mac that can't sleep keeps running and gets warm in a bag. Lid-closed mode is meant for a desk.
+The battery cutoff is a safety net, not a substitute for that.
 
 **Why not just run `caffeinate`?**
-`caffeinate` keeps the Mac awake but leaves the screen and keyboard lit, doesn't lock, and stays on until you remember to kill it.
-LightsOut does all of it in one click and hands control back to your normal sleep settings when you unlock.
-
-**What about battery?**
-While locked, the Mac stays awake by design, so it drains like an idle Mac with the screen off. Plug in for overnight runs.
+`caffeinate` keeps the Mac awake but leaves the screen and keyboard lit, doesn't lock, doesn't survive a lid close, and stays on
+until you remember to kill it. LightsOut does all of it in one step and hands sleep back to macOS when you unlock.
 
 **Private APIs? Will this break?**
-The lock and keyboard-light calls use undocumented Apple frameworks. They are loaded at runtime and checked first, so if a future macOS removes one,
-LightsOut skips that step and still turns off the display.
+The lock and keyboard-light calls use undocumented Apple frameworks. They are loaded at runtime and checked first, so if a future macOS
+removes one, LightsOut skips that step and still turns off the display.
 
 **Why Objective-C and not Swift?**
-It compiles with the stock `clang` that ships in Command Line Tools, with no Xcode project. It also runs on macOS versions older than 10.14.4, which don't include the Swift runtime.
+It compiles with the stock `clang` that ships in Command Line Tools, with no Xcode project. It also runs on macOS versions older than
+10.14.4, which don't include the Swift runtime.
+
+## Uninstall
+
+Run `./uninstall.sh`. It quits the app and removes it, the login entry, the lid-closed sudo rule (asks for your password) and the settings.
+
+If you'd rather delete the app by hand, untick **Keep running with the lid closed** in Settings first, so the sudo rule is removed too.
 
 ## Project layout
 
 ```
-LightsOut.m            the whole app: menu bar item, lights-out sequence, self-install
-Info.plist             bundle metadata (menu-bar-only app, macOS 10.13+)
-build.sh               compile a universal LightsOut.app into build/
-install.sh             build from source, copy to ~/Applications, launch
-uninstall.sh           remove the app, login agent and settings
-release.sh             build dist/LightsOut.dmg (optionally Developer ID signed + notarized)
-assets/make-icon.swift draws the app icon in code and writes AppIcon.icns
+src/main.m                     app delegate: menu bar item, lights-out sequence, self-install, clean-up
+src/Hotkey.{h,m}               system-wide shortcut (Carbon RegisterEventHotKey)
+src/ShortcutRecorder.{h,m}     the "press a shortcut" button
+src/LidMode.{h,m}              lid-closed mode: sudo rule install/remove, disablesleep on/off
+src/Battery.{h,m}              battery level and power-source change notifications
+src/SettingsWindowController.{h,m}  the Settings window, built in code
+src/Keys.h                     settings keys and defaults
+Info.plist                     bundle metadata (menu-bar-only app, macOS 10.13+)
+build.sh                       compile a universal LightsOut.app into build/
+install.sh / uninstall.sh      install from source / remove everything
+release.sh                     build dist/LightsOut.dmg (optionally Developer ID signed + notarized)
+assets/make-icon.swift         draws the app icon in code and writes AppIcon.icns
 ```
 
 ## Releasing

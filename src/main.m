@@ -1,8 +1,13 @@
-// LightsOut: one menu bar click -> keyboard light 0, lock screen, display off.
+// LightsOut: one menu bar click (or keyboard shortcut) -> keyboard light 0, lock screen, display off.
 // The Mac stays awake (so Claude Code / builds / downloads keep running) until you unlock.
 #import <Cocoa/Cocoa.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #include <dlfcn.h>
+#import "Battery.h"
+#import "Hotkey.h"
+#import "Keys.h"
+#import "LidMode.h"
+#import "SettingsWindowController.h"
 
 // Private CoreBrightness class (macOS 10.12.4+); we only declare the methods we call.
 @interface NSObject (KeyboardBrightnessClient)
@@ -19,16 +24,18 @@ static const NSTimeInterval kPollSeconds = 0.25;     // how often the guard chec
 static NSString *const kLoginFramework = @"/System/Library/PrivateFrameworks/login.framework/Versions/Current/login";
 static NSString *const kCGSession = @"/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession";
 static NSString *const kAgentLabel = @"com.lightsout.app";  // LaunchAgent that starts us at login
-static NSString *const kDidSetUp = @"didSetUp";              // first-run flag in NSUserDefaults
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, LOSettingsDelegate>
 @property (strong) NSStatusItem *item;
+@property (strong) LOSettingsWindowController *settings;
 @property (strong) id keyboard;                              // KeyboardBrightnessClient, nil if unavailable
 @property (strong) NSMutableDictionary<NSNumber *, NSNumber *> *savedLevels;
 @property (assign) IOPMAssertionID awake;
+@property (strong) id batteryWatch;
 @property (assign) BOOL locked;
 @property (strong) NSTimer *guard;
 @property (strong) NSDate *lastOff;                          // last time we darkened (or the click)
+@property (strong) dispatch_source_t sigterm;
 @end
 
 // Seconds since the last keyboard/trackpad/mouse event (the same idle clock screen savers use).
@@ -47,6 +54,10 @@ static double hidIdleSeconds(void) {
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
   if ([self relocateIfNeeded] || [self olderInstanceIsRunning]) { [NSApp terminate:nil]; return; }
 
+  // Starting up means no lights-out session is active: if a crash, force-quit or restart left sleep
+  // disabled, turn it back on now.
+  [[LOLidMode shared] disengage];
+
   self.item = [NSStatusBar.systemStatusBar statusItemWithLength:NSSquareStatusItemLength];
   if (@available(macOS 11.0, *)) {
     NSImage *img = [NSImage imageWithSystemSymbolName:@"moon.zzz.fill" accessibilityDescription:@"LightsOut"];
@@ -55,7 +66,7 @@ static double hidIdleSeconds(void) {
   } else {
     self.item.button.title = @"☾";
   }
-  self.item.button.toolTip = @"LightsOut: keyboard light off, lock, screen off. Right-click for options.";
+  self.item.button.toolTip = @"LightsOut: keyboard light off, lock, screen off. Right-click for Settings.";
   self.item.button.target = self;
   self.item.button.action = @selector(clicked:);
   [self.item.button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
@@ -70,14 +81,26 @@ static double hidIdleSeconds(void) {
   [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self selector:@selector(screensWoke:)
                                                          name:NSWorkspaceScreensDidWakeNotification object:nil];
 
+  // launchd stops us with SIGTERM (logout, `launchctl bootout`); quit cleanly so sleep gets restored.
+  signal(SIGTERM, SIG_IGN);
+  self.sigterm = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_main_queue());
+  dispatch_source_set_event_handler(self.sigterm, ^{ [NSApp terminate:nil]; });
+  dispatch_resume(self.sigterm);
+
+  [self registerSavedShortcut];
+
   NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
-  if (![d boolForKey:kDidSetUp]) {
+  if (![d boolForKey:LOKeyDidSetUp]) {
     [self setStartsAtLogin:YES];
-    [d setBool:YES forKey:kDidSetUp];
+    [d setBool:YES forKey:LOKeyDidSetUp];
     [self showWelcome];
   } else if (self.startsAtLogin) {
     [self setStartsAtLogin:YES];  // rewrite the path in case the app was moved
   }
+}
+
+- (void)applicationWillTerminate:(NSNotification *)n {
+  [self welcomeBack];
 }
 
 #pragma mark - Setup (move out of the DMG, one instance, start at login)
@@ -141,16 +164,53 @@ static double hidIdleSeconds(void) {
   [plist writeToFile:self.agentPath atomically:YES];
 }
 
-- (void)toggleStartsAtLogin:(id)sender { [self setStartsAtLogin:!self.startsAtLogin]; }
-
 - (void)showWelcome {
   NSAlert *a = [NSAlert new];
   a.messageText = @"LightsOut is in your menu bar";
   a.informativeText = @"Click the moon icon to turn off the screen and keyboard light and lock your Mac. "
                        "Everything keeps running until you unlock.\n\n"
-                       "It starts automatically at login. Right-click the icon for options.";
+                       "Right-click the icon for Settings: add a keyboard shortcut, or let your Mac keep "
+                       "running with the lid closed.";
   [NSApp activateIgnoringOtherApps:YES];
   [a runModal];
+}
+
+#pragma mark - Keyboard shortcut and Settings
+
+- (void)registerSavedShortcut {
+  NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+  NSInteger code = [d objectForKey:LOKeyHotkeyCode] ? [d integerForKey:LOKeyHotkeyCode] : -1;
+  if (code < 0) { [[LOHotkey shared] unregister]; return; }
+  NSEventModifierFlags mods = (NSEventModifierFlags)[d integerForKey:LOKeyHotkeyModifiers];
+  if (![self registerShortcutKeyCode:code modifiers:mods])
+    NSLog(@"LightsOut: shortcut %@ is taken by another app", [LOHotkey displayStringForKeyCode:code modifiers:mods]);
+}
+
+- (BOOL)registerShortcutKeyCode:(NSInteger)code modifiers:(NSEventModifierFlags)mods {
+  __weak AppDelegate *weakSelf = self;
+  return [[LOHotkey shared] registerKeyCode:code modifiers:mods handler:^{ [weakSelf lightsOut]; }];
+}
+
+- (BOOL)settingsDidChangeShortcutKeyCode:(NSInteger)keyCode modifiers:(NSEventModifierFlags)modifiers {
+  NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+  if (keyCode < 0) {
+    [[LOHotkey shared] unregister];
+    [d removeObjectForKey:LOKeyHotkeyCode];
+    [d removeObjectForKey:LOKeyHotkeyModifiers];
+    return YES;
+  }
+  if (![self registerShortcutKeyCode:keyCode modifiers:modifiers]) {
+    [self registerSavedShortcut];  // macOS refused it: keep the previous shortcut working
+    return NO;
+  }
+  [d setInteger:keyCode forKey:LOKeyHotkeyCode];
+  [d setInteger:(NSInteger)modifiers forKey:LOKeyHotkeyModifiers];
+  return YES;
+}
+
+- (void)showSettings:(id)sender {
+  if (!self.settings) self.settings = [[LOSettingsWindowController alloc] initWithDelegate:self];
+  [self.settings present];
 }
 
 #pragma mark - Menu bar
@@ -159,11 +219,16 @@ static double hidIdleSeconds(void) {
   NSEvent *e = NSApp.currentEvent;
   if (e.type == NSEventTypeRightMouseUp || (e.modifierFlags & NSEventModifierFlagControl)) {
     NSMenu *m = [NSMenu new];
-    NSMenuItem *login = [m addItemWithTitle:@"Start at Login" action:@selector(toggleStartsAtLogin:) keyEquivalent:@""];
-    login.target = self;
-    login.state = self.startsAtLogin ? NSControlStateValueOn : NSControlStateValueOff;
+    NSString *title = @"Lights Out Now";
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    if ([d objectForKey:LOKeyHotkeyCode])
+      title = [title stringByAppendingFormat:@"   %@",
+               [LOHotkey displayStringForKeyCode:[d integerForKey:LOKeyHotkeyCode]
+                                       modifiers:(NSEventModifierFlags)[d integerForKey:LOKeyHotkeyModifiers]]];
+    [m addItemWithTitle:title action:@selector(lightsOut) keyEquivalent:@""].target = self;
+    [m addItemWithTitle:@"Settings…" action:@selector(showSettings:) keyEquivalent:@","].target = self;
     [m addItem:NSMenuItem.separatorItem];
-    [m addItemWithTitle:@"Quit LightsOut" action:@selector(terminate:) keyEquivalent:@""];
+    [m addItemWithTitle:@"Quit LightsOut" action:@selector(terminate:) keyEquivalent:@"q"];
     [m popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, NSHeight(self.item.button.bounds) + 4)
                          inView:self.item.button];
     return;
@@ -171,9 +236,15 @@ static double hidIdleSeconds(void) {
   [self lightsOut];
 }
 
+#pragma mark - Lights out
+
 - (void)lightsOut {
   [self keyboardLightOff];
-  [self holdAwake];
+  if ([self batteryAllowsStayingAwake]) {
+    [self holdAwake];
+    [[LOLidMode shared] engage];  // no-op unless lid-closed mode was set up in Settings
+    [self watchBattery];
+  }
   self.locked = [self lockScreen];
   self.lastOff = [NSDate date];
   [self.guard invalidate];
@@ -223,6 +294,24 @@ static double hidIdleSeconds(void) {
   [self.savedLevels removeAllObjects];
 }
 
+#pragma mark - Staying awake
+
+// On battery at or below the user's cutoff (Settings, default 20%), we don't keep the Mac awake.
+- (BOOL)batteryAllowsStayingAwake {
+  NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+  NSInteger cutoff = [d objectForKey:LOKeyBatteryCutoff] ? [d integerForKey:LOKeyBatteryCutoff] : LODefaultBatteryCutoff;
+  NSInteger percent = [LOBattery percentWhenOnBattery];
+  return cutoff <= 0 || percent < 0 || percent > cutoff;
+}
+
+- (void)watchBattery {
+  if (self.batteryWatch) return;
+  __weak AppDelegate *weakSelf = self;
+  self.batteryWatch = [LOBattery watch:^{
+    if (![weakSelf batteryAllowsStayingAwake]) [weakSelf letMacSleep];
+  }];
+}
+
 // Same as `caffeinate -i`: blocks idle *system* sleep but still lets the display sleep.
 - (void)holdAwake {
   if (self.awake) return;
@@ -232,10 +321,18 @@ static double hidIdleSeconds(void) {
     self.awake = a;
 }
 
-- (void)welcomeBack {
-  [self stopGuard];
+// Hands sleep back to macOS: drop the power assertion and, if we disabled it, turn system sleep back on.
+- (void)letMacSleep {
   if (self.awake) IOPMAssertionRelease(self.awake);
   self.awake = 0;
+  [[LOLidMode shared] disengage];
+  [LOBattery stopWatching:self.batteryWatch];
+  self.batteryWatch = nil;
+}
+
+- (void)welcomeBack {
+  [self stopGuard];
+  [self letMacSleep];
   self.locked = NO;
   [self keyboardLightRestore];
 }
