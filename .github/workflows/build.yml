@@ -1,0 +1,23 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal app and DMG
+        run: ./release.sh
+
+      - name: Verify universal binary
+        run: lipo -archs build/LightsOut.app/Contents/MacOS/LightsOut | grep -q "x86_64 arm64"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LightsOut.dmg
+          path: dist/LightsOut.dmg
