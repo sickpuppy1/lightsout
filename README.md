@@ -169,7 +169,7 @@ Now LightsOut waits for 1 s of no input, then guards for 10 s and turns the disp
 | --- | --- |
 | macOS | 10.13 High Sierra and later (Apple Silicon needs 11 Big Sur or later) |
 | Hardware | Any Mac. Keyboard-light control applies to MacBooks with a backlit keyboard. |
-| Tested on | macOS 15.6, MacBook Air (M1). Reports from other versions are welcome. |
+| Tested on | macOS 15.6, MacBook Air (M1); macOS 26.6.2, MacBook Air (M5). Reports from other versions are welcome. |
 
 ## FAQ
 
