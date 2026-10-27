@@ -1,14 +1,16 @@
 #import "SettingsWindowController.h"
 #import "Keys.h"
 #import "LidMode.h"
+#import "Processes.h"
 #import "ShortcutRecorder.h"
 
 static NSString *const kGitHubURL = @"https://github.com/sickpuppy1/lightsout";
 
-@interface LOSettingsWindowController ()
+@interface LOSettingsWindowController () <NSMenuDelegate>
 @property (weak) id<LOSettingsDelegate> delegate;
 @property (strong) LOShortcutRecorder *recorder;
 @property (strong) NSButton *lidBox;
+@property (strong) NSPopUpButton *awakePopup;
 @property (strong) NSPopUpButton *cutoffPopup;
 @property (strong) NSButton *loginBox;
 @property (strong) NSStackView *rootStack;
@@ -73,7 +75,20 @@ static NSString *const kGitHubURL = @"https://github.com/sickpuppy1/lightsout";
                                         help:@"Asks for your admin password once. "
                                              @"Sleep is turned back on the moment you unlock."];
 
-  // Row 3: battery cutoff.
+  // Row 3: keep awake until unlock, or only while picked apps / terminal commands run.
+  // A pull-down: item 0 is the button's title, the rest is rebuilt from what's running each time it opens.
+  self.awakePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:YES];
+  self.awakePopup.menu.delegate = self;
+  self.awakePopup.autoenablesItems = NO;  // so the section headers below stay disabled labels
+  self.awakePopup.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.awakePopup.widthAnchor constraintLessThanOrEqualToConstant:230].active = YES;  // long picks truncate
+  ((NSPopUpButtonCell *)self.awakePopup.cell).lineBreakMode = NSLineBreakByTruncatingTail;
+  NSStackView *awakeRow = [self rowWithViews:@[[NSTextField labelWithString:@"Keep the Mac awake:"], self.awakePopup]];
+  NSStackView *awakeGroup = [self groupWithRow:awakeRow
+                                          help:@"Pick apps or terminal commands to let the Mac sleep "
+                                               @"as soon as they have all quit."];
+
+  // Row 4: battery cutoff.
   self.cutoffPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
   NSArray<NSString *> *titles = @[@"Never", @"10%", @"20%", @"30%", @"50%"];
   const NSInteger tags[] = {0, 10, 20, 30, 50};
@@ -89,13 +104,13 @@ static NSString *const kGitHubURL = @"https://github.com/sickpuppy1/lightsout";
                                            help:@"A safety net while LightsOut keeps your Mac awake: "
                                                 @"below this charge, normal sleep comes back."];
 
-  // Row 4: start at login.
+  // Row 5: start at login.
   self.loginBox = [NSButton checkboxWithTitle:@"Start LightsOut at login"
                                        target:self
                                        action:@selector(loginToggled:)];
   NSStackView *loginGroup = [self groupWithRow:self.loginBox help:nil];
 
-  // Row 5: footer with the GitHub link and version.
+  // Row 6: footer with the GitHub link and version.
   NSButton *github = [NSButton buttonWithTitle:@"LightsOut on GitHub" target:self action:@selector(openGitHub:)];
   github.bordered = NO;
   github.attributedTitle = [[NSAttributedString alloc] initWithString:github.title attributes:@{
@@ -108,7 +123,7 @@ static NSString *const kGitHubURL = @"https://github.com/sickpuppy1/lightsout";
   versionLabel.textColor = NSColor.secondaryLabelColor;
   NSStackView *footer = [self rowWithViews:@[github, versionLabel]];
 
-  NSStackView *root = [NSStackView stackViewWithViews:@[shortcutGroup, lidGroup, cutoffGroup, loginGroup, footer]];
+  NSStackView *root = [NSStackView stackViewWithViews:@[shortcutGroup, lidGroup, awakeGroup, cutoffGroup, loginGroup, footer]];
   root.orientation = NSUserInterfaceLayoutOrientationVertical;
   root.alignment = NSLayoutAttributeLeading;
   root.spacing = 16;
@@ -167,6 +182,8 @@ static NSString *const kGitHubURL = @"https://github.com/sickpuppy1/lightsout";
                                                                 : LODefaultBatteryCutoff;
   [self.cutoffPopup selectItemWithTag:cutoff];
 
+  [self refreshAwakeTitle];
+
   self.loginBox.state = [self.delegate startsAtLogin] ? NSControlStateValueOn : NSControlStateValueOff;
 }
 
@@ -197,6 +214,87 @@ static NSString *const kGitHubURL = @"https://github.com/sickpuppy1/lightsout";
 
 - (void)loginToggled:(NSButton *)sender {
   [self.delegate setStartsAtLogin:(sender.state == NSControlStateValueOn)];
+}
+
+#pragma mark - Keep-awake menu
+
+- (NSArray<NSString *> *)picked:(NSString *)key {
+  return [NSUserDefaults.standardUserDefaults stringArrayForKey:key] ?: @[];
+}
+
+static NSString *appName(NSString *bundleID) {
+  NSRunningApplication *app = [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleID].firstObject;
+  if (app.localizedName) return app.localizedName;
+  NSURL *url = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:bundleID];
+  return url ? [NSFileManager.defaultManager displayNameAtPath:url.path].stringByDeletingPathExtension : bundleID;
+}
+
+- (void)refreshAwakeTitle {
+  NSMutableArray<NSString *> *names = [NSMutableArray array];
+  for (NSString *bundleID in [self picked:LOKeyAwakeApps]) [names addObject:appName(bundleID)];
+  [names addObjectsFromArray:[self picked:LOKeyAwakeCommands]];
+  NSString *title = names.count ? [@"While running: " stringByAppendingString:[names componentsJoinedByString:@", "]]
+                                : @"Until I unlock";
+  if (!self.awakePopup.numberOfItems) [self.awakePopup addItemWithTitle:@""];
+  [self.awakePopup itemAtIndex:0].title = title;
+}
+
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+  NSArray<NSString *> *apps = [self picked:LOKeyAwakeApps], *commands = [self picked:LOKeyAwakeCommands];
+  NSMenuItem *title = [menu itemAtIndex:0];
+  [menu removeAllItems];
+  [menu addItem:title];
+
+  NSMenuItem *unlock = [menu addItemWithTitle:@"Until I unlock" action:@selector(awakeUntilUnlock:) keyEquivalent:@""];
+  unlock.target = self;
+  unlock.state = (apps.count || commands.count) ? NSControlStateValueOff : NSControlStateValueOn;
+
+  NSMutableArray<NSString *> *runningApps = [NSMutableArray array];
+  for (NSRunningApplication *app in [LOProcesses regularApps]) [runningApps addObject:app.bundleIdentifier];
+  [self addSection:@"Apps" running:runningApps picked:apps name:^(NSString *b) { return appName(b); }
+            action:@selector(toggleApp:) toMenu:menu];
+  [self addSection:@"Terminal commands" running:[LOProcesses terminalCommands] picked:commands
+              name:^(NSString *c) { return c; } action:@selector(toggleCommand:) toMenu:menu];
+}
+
+// A header and one tick-able item per running value; picked ones that aren't running stay listed so they can be unticked.
+- (void)addSection:(NSString *)header running:(NSArray<NSString *> *)running picked:(NSArray<NSString *> *)picked
+              name:(NSString * (^)(NSString *))name action:(SEL)action toMenu:(NSMenu *)menu {
+  [menu addItem:NSMenuItem.separatorItem];
+  [menu addItemWithTitle:header action:nil keyEquivalent:@""].enabled = NO;
+  NSMutableArray<NSString *> *values = [running mutableCopy];
+  for (NSString *v in picked) if (![values containsObject:v]) [values addObject:v];
+  if (!values.count) {
+    NSMenuItem *none = [menu addItemWithTitle:@"None running" action:nil keyEquivalent:@""];
+    none.enabled = NO;
+    none.indentationLevel = 1;
+  }
+  for (NSString *v in values) {
+    NSString *title = [running containsObject:v] ? name(v) : [name(v) stringByAppendingString:@" (not running)"];
+    NSMenuItem *item = [menu addItemWithTitle:title action:action keyEquivalent:@""];
+    item.target = self;
+    item.representedObject = v;
+    item.indentationLevel = 1;
+    item.state = [picked containsObject:v] ? NSControlStateValueOn : NSControlStateValueOff;
+  }
+}
+
+- (void)awakeUntilUnlock:(id)sender {
+  [NSUserDefaults.standardUserDefaults removeObjectForKey:LOKeyAwakeApps];
+  [NSUserDefaults.standardUserDefaults removeObjectForKey:LOKeyAwakeCommands];
+  [self refreshAwakeTitle];
+}
+
+- (void)toggleApp:(NSMenuItem *)item { [self toggle:item.representedObject inList:LOKeyAwakeApps]; }
+
+- (void)toggleCommand:(NSMenuItem *)item { [self toggle:item.representedObject inList:LOKeyAwakeCommands]; }
+
+- (void)toggle:(NSString *)value inList:(NSString *)key {
+  NSMutableArray<NSString *> *list = [[self picked:key] mutableCopy];
+  if ([list containsObject:value]) [list removeObject:value];
+  else [list addObject:value];
+  [NSUserDefaults.standardUserDefaults setObject:list forKey:key];
+  [self refreshAwakeTitle];
 }
 
 - (void)openGitHub:(id)sender {

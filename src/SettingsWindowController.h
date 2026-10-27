@@ -1,4 +1,4 @@
-// The Settings window: keyboard shortcut, lid-closed mode, battery cutoff, start at login.
+// The Settings window: keyboard shortcut, lid-closed mode, keep-awake apps, battery cutoff, start at login.
 #import <Cocoa/Cocoa.h>
 
 @protocol LOSettingsDelegate <NSObject>

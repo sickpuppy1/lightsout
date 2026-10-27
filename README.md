@@ -41,6 +41,7 @@ and the Mac locks. Your work keeps running until you come back. If you turn on l
 | 🔒 **Locks instantly** | The same lock as <kbd>⌃</kbd> <kbd>⌘</kbd> <kbd>Q</kbd>. |
 | 🖥️ **Screen off, and it stays off** | Waits until your hands leave the trackpad. If a stray touch wakes the display in the next 10 s, it goes dark again. |
 | ⚡ **Keeps working** | Holds the Mac awake while locked, so jobs aren't paused. |
+| 🎯 **Only as long as you need** *(optional)* | Pick apps or terminal commands, like `claude`, and normal sleep returns once they've all quit. |
 | 💻 **Lid-closed mode** *(optional)* | Close the lid and the Mac keeps running. Asks for your admin password once. |
 | 🔋 **Battery safety net** | On battery, normal sleep returns below a charge level you pick (default 20%). |
 | ↩️ **Back to normal on unlock** | Your usual sleep settings return the moment you unlock, after a quit, and after a crash or restart. |
@@ -77,7 +78,7 @@ Apps you compile yourself are not quarantined, so macOS doesn't ask for approval
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/settings-dark.png">
-    <img src="assets/settings-light.png" width="488" alt="LightsOut Settings window: shortcut recorder, lid-closed mode checkbox, battery cutoff menu, start at login">
+    <img src="assets/settings-light.png" width="488" alt="LightsOut Settings window: shortcut recorder, lid-closed mode checkbox, keep-awake menu, battery cutoff menu, start at login">
   </picture>
 </p>
 
@@ -85,6 +86,9 @@ Apps you compile yourself are not quarantined, so macOS doesn't ask for approval
   <kbd>⌃</kbd><kbd>⌥</kbd><kbd>⌘</kbd><kbd>L</kbd>. F-keys work on their own. <kbd>Delete</kbd> clears it, <kbd>Esc</kbd> cancels.
   No shortcut is set by default.
 - **Keep running with the lid closed:** see [Lid-closed mode](#lid-closed-mode).
+- **Keep the Mac awake:** *Until I unlock* (default), or tick any running apps and terminal commands (`claude`, `npm`,
+  `xcodebuild`…). LightsOut checks every 15 s, and once all of them have quit, normal sleep returns, even while locked.
+  The whole Mac stays awake while they run, because macOS can't keep a single app awake.
 - **On battery, let the Mac sleep at:** Never, 10%, 20% (default), 30% or 50%.
 - **Start LightsOut at login:** on by default.
 
@@ -112,6 +116,7 @@ Unticking the box (or running `./uninstall.sh`) asks for your password again and
 | --- | --- |
 | You unlock | Releases the stay-awake hold, turns sleep back on, restores the keyboard light |
 | Battery falls to your cutoff | Releases the hold and turns sleep back on, even while locked |
+| The apps or commands you picked have all quit | Same, even while locked |
 | You quit LightsOut, log out or shut down | Same clean-up before exiting (it also handles `SIGTERM` from `launchd`) |
 | Crash, force quit or power loss | A "sleep is disabled" flag is saved to disk first, and the next launch turns sleep back on |
 | You had disabled sleep yourself | LightsOut leaves it alone and never turns it back on for you |
@@ -148,6 +153,7 @@ sequenceDiagram
 | Lock | `SACLockScreenImmediate()` from `login.framework` | The function behind <kbd>⌃⌘Q</kbd>. Falls back to `CGSession -suspend` on older macOS. |
 | Display off | `pmset displaysleepnow` | Waits until `HIDIdleTime` (seconds since last keyboard/trackpad input) ≥ 1 s. |
 | Keyboard light | `KeyboardBrightnessClient` from `CoreBrightness.framework` | The same interface Control Center uses. |
+| Picked apps and commands | `NSRunningApplication` for apps; each process's `argv[0]` (`sysctl KERN_PROCARGS2`) for commands | `argv[0]`, because Claude Code's binary is named after its version. Checked every 15 s. |
 | Shortcut | Carbon `RegisterEventHotKey` | System-wide, and needs **no Accessibility permission**. |
 | Battery cutoff | IOKit power-source notifications | Re-checked on every plug/unplug and charge change. |
 | Start at login | A LaunchAgent in `~/Library/LaunchAgents` | Behaves the same on every macOS version. Restarts after a crash, not after Quit. |
@@ -161,7 +167,7 @@ Now LightsOut waits for 1 s of no input, then guards for 10 s and turns the disp
 - **No Accessibility, Screen Recording or Full Disk Access prompts.** The keyboard shortcut works without them.
 - **Admin password only if you turn on lid-closed mode.** It is used once, for the single rule shown above.
 - **No network access, no analytics, no data collected.**
-- **Small enough to read:** about 1,100 lines of Objective-C in [`src/`](src).
+- **Small enough to read:** about 1,250 lines of Objective-C in [`src/`](src).
 
 ## Compatibility
 
@@ -206,6 +212,7 @@ src/Hotkey.{h,m}               system-wide shortcut (Carbon RegisterEventHotKey)
 src/ShortcutRecorder.{h,m}     the "press a shortcut" button
 src/LidMode.{h,m}              lid-closed mode: sudo rule install/remove, disablesleep on/off
 src/Battery.{h,m}              battery level and power-source change notifications
+src/Processes.{h,m}            running apps and terminal commands, for "keep awake while these run"
 src/SettingsWindowController.{h,m}  the Settings window, built in code
 src/Keys.h                     settings keys and defaults
 Info.plist                     bundle metadata (menu-bar-only app, macOS 10.13+)

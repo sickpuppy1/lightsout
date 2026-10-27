@@ -1,5 +1,6 @@
 // LightsOut: one menu bar click (or keyboard shortcut) -> keyboard light 0, lock screen, display off.
-// The Mac stays awake (so Claude Code / builds / downloads keep running) until you unlock.
+// The Mac stays awake (so Claude Code / builds / downloads keep running) until you unlock, or only until the apps
+// and commands picked in Settings have all quit.
 #import <Cocoa/Cocoa.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #include <dlfcn.h>
@@ -7,6 +8,7 @@
 #import "Hotkey.h"
 #import "Keys.h"
 #import "LidMode.h"
+#import "Processes.h"
 #import "SettingsWindowController.h"
 
 // Private CoreBrightness class (macOS 10.12.4+); we only declare the methods we call.
@@ -20,6 +22,7 @@
 static const NSTimeInterval kHandsOffSeconds = 1.0;  // trackpad/keyboard untouched this long before display off
 static const NSTimeInterval kGuardSeconds = 10.0;    // re-darken if a stray touch wakes the display this soon after
 static const NSTimeInterval kPollSeconds = 0.25;     // how often the guard checks
+static const NSTimeInterval kAppPollSeconds = 15.0;  // how often we check whether the picked apps are still running
 
 static NSString *const kLoginFramework = @"/System/Library/PrivateFrameworks/login.framework/Versions/Current/login";
 static NSString *const kCGSession = @"/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession";
@@ -32,6 +35,7 @@ static NSString *const kAgentLabel = @"com.lightsout.app";  // LaunchAgent that 
 @property (strong) NSMutableDictionary<NSNumber *, NSNumber *> *savedLevels;
 @property (assign) IOPMAssertionID awake;
 @property (strong) id batteryWatch;
+@property (strong) NSTimer *appWatch;
 @property (assign) BOOL locked;
 @property (strong) NSTimer *guard;
 @property (strong) NSDate *lastOff;                          // last time we darkened (or the click)
@@ -240,10 +244,11 @@ static double hidIdleSeconds(void) {
 
 - (void)lightsOut {
   [self keyboardLightOff];
-  if ([self batteryAllowsStayingAwake]) {
+  if ([self batteryAllowsStayingAwake] && [self pickedAppsStillRunning]) {
     [self holdAwake];
     [[LOLidMode shared] engage];  // no-op unless lid-closed mode was set up in Settings
     [self watchBattery];
+    [self watchPickedApps];
   }
   self.locked = [self lockScreen];
   self.lastOff = [NSDate date];
@@ -312,6 +317,26 @@ static double hidIdleSeconds(void) {
   }];
 }
 
+// "Keep the Mac awake" in Settings: until unlock (nothing picked), or only while a picked app or command runs.
+- (BOOL)pickedAppsStillRunning {
+  NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+  NSArray *apps = [d stringArrayForKey:LOKeyAwakeApps] ?: @[], *commands = [d stringArrayForKey:LOKeyAwakeCommands] ?: @[];
+  return (!apps.count && !commands.count) || [LOProcesses anyRunningApps:apps commands:commands];
+}
+
+- (void)watchPickedApps {
+  NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+  if (self.appWatch || (![d stringArrayForKey:LOKeyAwakeApps].count && ![d stringArrayForKey:LOKeyAwakeCommands].count))
+    return;
+  self.appWatch = [NSTimer scheduledTimerWithTimeInterval:kAppPollSeconds target:self selector:@selector(appWatchTick:)
+                                                 userInfo:nil repeats:YES];
+  self.appWatch.tolerance = 5.0;
+}
+
+- (void)appWatchTick:(NSTimer *)t {
+  if (![self pickedAppsStillRunning]) [self letMacSleep];
+}
+
 // Same as `caffeinate -i`: blocks idle *system* sleep but still lets the display sleep.
 - (void)holdAwake {
   if (self.awake) return;
@@ -328,6 +353,8 @@ static double hidIdleSeconds(void) {
   [[LOLidMode shared] disengage];
   [LOBattery stopWatching:self.batteryWatch];
   self.batteryWatch = nil;
+  [self.appWatch invalidate];
+  self.appWatch = nil;
 }
 
 - (void)welcomeBack {
